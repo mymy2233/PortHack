@@ -1,0 +1,4 @@
+{
+    "nodes": [{"ip": "127.0.0.1", "user": "kali", "pass": "kali", "proxy_port": 1080}],
+    "wordlist_local": "当前项目的绝对路径/pass.dic"
+}
