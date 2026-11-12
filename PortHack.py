@@ -62,6 +62,26 @@ warnings.filterwarnings(
 from scapy.all import IP, TCP, sr1
 init(autoreset=True)
 
+def wait_msf_ready(password, server="127.0.0.1", port=55553, ssl=False, timeout=180):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            with socket.create_connection((server, port), timeout=2):
+                pass
+        except OSError:
+            print(f"{Fore.GREEN}[*] 等待 msfrpcd 端口... {int(time.time()-t0)}s")
+            time.sleep(2)
+            continue
+        try:
+            client = MsfRpcClient(password, server=server, port=port, ssl=ssl, timeout=10)
+            _ = client.core.version
+            print(f"{Fore.GREEN}[+] MSF RPC 就绪（{int(time.time()-t0)}s）")
+            return client
+        except Exception as e:
+            print(f"{Fore.GREEN}[*] msfrpcd 正在初始化: {e!r}")
+            time.sleep(2)
+    raise TimeoutError(f"{Fore.YELLOW}MSF RPC {timeout}s 内未就绪")
+
 class PortHack:
     def __init__(self, target_ip):
         self.target_ip = target_ip
@@ -73,6 +93,8 @@ class PortHack:
         self.load_num = 0
         self.url = None
         self.session = None
+        self.TTL_MAP = {64: "Linux/Unix", 128: "Windows", 255: "网络设备"}
+        self._TTL_RE = re.compile(r"[Tt][Tt][Ll][=:：]\s*(\d+)")
         self.user = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user.dic')
         self.load_all_modules(self.load_num)
 
@@ -247,7 +269,7 @@ class PortHack:
                     preexec_fn=os.setsid
                 )
             for _ in range(30):
-                time.sleep(0.5)
+                time.sleep(1)
                 try:
                     test_client = MsfRpcClient(
                         self.config["msf_rpc_pass"],
@@ -269,7 +291,8 @@ class PortHack:
         if self.msf_client is None:
             if self._start_msf_rpc():
                 try:
-                    self.msf_client = MsfRpcClient(
+                    #self.msf_client = MsfRpcClient(
+                    self.msf_client = wait_msf_ready(
                         self.config["msf_rpc_pass"],
                         server=self.config["msf_rpc_host"],
                         port=self.config["msf_rpc_port"],
@@ -316,32 +339,55 @@ class PortHack:
                 ports.add(mod.port)
         return list(ports)
 
+    def guess_os(self, target_ip: str) -> str:
+        count_flag = "-n" if os.name == "nt" else "-c"
+        try:
+            result = subprocess.run(
+                ["ping", count_flag, "4", target_ip],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return "未知"
+        except (OSError, FileNotFoundError):
+            return "未知"
+        ttls = [int(x) for x in self._TTL_RE.findall(result.stdout)]
+        if not ttls:
+            return "未知"
+        ttl = max(ttls)
+        candidates = sorted(k for k in self.TTL_MAP if k >= ttl)
+        return self.TTL_MAP[candidates[0]] if candidates else "未知"
+
     def run_full_assault(self):
         safe_print(f"[*] 目标: {self.target_ip}")
         if self.is_url(self.target_ip):
             self.url = self.target_ip
             target_ip = socket.gethostbyname(self.target_ip)
             print(f"[*] IPv4 地址: {self.target_ip}")
-        try:
-            out = subprocess.run(f"ping {'-n' if os.name=='nt' else '-c'} 4 {target_ip}",
-                         shell=True, capture_output=True, text=True, timeout=10).stdout
-            ttls = [int(x) for x in re.findall(r"(?:TTL|ttl|生存时间)=?(\d+)", out)]
-            ttl = sum(ttls)//len(ttls) if ttls else None
-            # OS 判断
-            if ttl:
-                possible = [k for k in TTL_MAP if k >= ttl]
-                os = TTL_MAP[min(possible)] if possible else "未知"
-            else:
-                os = "未知"
-        except:
-            os = "未知"
+
+
+#        try:
+#            out = subprocess.run(f"ping {'-n' if os.name=='nt' else '-c'} 4 {target_ip}",
+#                         shell=True, capture_output=True, text=True, timeout=10).stdout
+#            ttls = [int(x) for x in re.findall(r"(?:TTL|ttl|生存时间)=?(\d+)", out)]
+#            ttl = sum(ttls)//len(ttls) if ttls else None
+#            # OS 判断
+#            if ttl:
+#                possible = [k for k in TTL_MAP if k >= ttl]
+#                system = TTL_MAP[min(possible)] if possible else "未知"
+#            else:
+#                system = "未知"
+#        except:
+#            system = "未知"
+
+
+        system = self.guess_os(self.target_ip)
         try:
             mobile = scan.info(socket.gethostbyname(self.target_ip))["is_mobile"]
-            if mobile:
-                os = "Android"
+            if mobile and (os == 'Linux/Unix'):
+                system = "Android?"
         except:
             pass
-        safe_print(f"[*] 目标操作系统：{os}")
+        safe_print(f"[*] 目标操作系统：{system}")
         try:
            proxy = scan.info(socket.gethostbyname(self.target_ip))["is_proxy"]
            if proxy:
@@ -362,6 +408,14 @@ class PortHack:
         openssl_bug = self.openssl_bug(self.target_ip)
         if not self.m == None:
             print(openssl_bug)
+
+        safe_print(f"{Fore.GREEN}[*] 等待 MSF RPC 就绪...")
+        try:
+            self.connect_msf()
+        except Exception as e:
+            safe_print(f"{Fore.RED}[-] RPC 未就绪: {e!r}，中止")
+            return
+
         for port in open_ports:
             t = threading.Thread(target=self._try_dynamic_msf, args=(port,))
             t.start()

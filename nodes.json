@@ -1,4 +1,4 @@
 {
-    "nodes": [{"ip": "127.0.0.1", "user": "kali", "pass": "kali", "proxy_port": 1080}],
-    "wordlist_local": "当前项目的绝对路径/pass.dic"
+    "nodes": [{"ip": "127.0.0.1", "user": "kali", "pass": "kali", "proxy_port": 1080, "hydra_path": "项目根目录（家目录不能用~/modules/custom/hydra"}],
+    "wordlist_local": "pass.dic"
 }

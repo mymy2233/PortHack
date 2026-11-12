@@ -10,5 +10,5 @@
     ],
     "leader_election_port": 5000,
     "check_interval": 30,
-    "recovery_scripts_dir": "当前项目的绝对路径/recovery"
+    "recovery_scripts_dir": "项目根目录/recovery"
 }
